@@ -17,6 +17,7 @@ import type { HomeAssistant } from "../types";
 import { AudioRecorder } from "../util/audio-recorder";
 import { documentationUrl } from "../util/documentation-url";
 import "./ha-alert";
+import "./ha-expansion-panel";
 import "./ha-markdown";
 import "./ha-textfield";
 import type { HaTextField } from "./ha-textfield";
@@ -25,6 +26,8 @@ interface AssistMessage {
   who: string;
   text?: string | TemplateResult;
   error?: boolean;
+  thinking?: boolean;
+  thinkingContent?: string;
 }
 
 @customElement("ha-assist-chat")
@@ -127,16 +130,41 @@ export class HaAssistChat extends LitElement {
         <div class="spacer"></div>
         ${this._conversation!.map(
           (message) => html`
-            <ha-markdown
+            <div
               class="message ${classMap({
                 error: !!message.error,
                 [message.who]: true,
               })}"
-              breaks
-              cache
-              .content=${message.text}
             >
-            </ha-markdown>
+              ${message.thinking
+                ? html`
+                    <div class="thinking-indicator">
+                      <span class="thinking-text">thinking</span>
+                      <span class="thinking-dots">
+                        <span class="dot"></span>
+                        <span class="dot"></span>
+                        <span class="dot"></span>
+                      </span>
+                    </div>
+                  `
+                : nothing}
+              <ha-markdown breaks cache .content=${message.text}> </ha-markdown>
+              ${message.thinkingContent && !message.thinking
+                ? html`
+                    <ha-expansion-panel
+                      class="thinking-expansion"
+                      .header=${"Show thinking"}
+                    >
+                      <ha-markdown
+                        breaks
+                        cache
+                        .content=${message.thinkingContent}
+                      >
+                      </ha-markdown>
+                    </ha-expansion-panel>
+                  `
+                : nothing}
+            </div>
           `
         )}
       </div>
@@ -484,6 +512,8 @@ export class HaAssistChat extends LitElement {
 
   private _createAddHassMessageProcessor() {
     let currentDeltaRole = "";
+    let isThinking = false;
+    let thinkingBuffer = "";
 
     const progressToNextMessage = () => {
       if (progress.hassMessage.text === "…") {
@@ -498,6 +528,8 @@ export class HaAssistChat extends LitElement {
         who: "hass",
         text: "…",
         error: false,
+        thinking: false,
+        thinkingContent: undefined,
       };
       this._addMessage(progress.hassMessage);
     };
@@ -523,6 +555,8 @@ export class HaAssistChat extends LitElement {
         who: "hass",
         text: "…",
         error: false,
+        thinking: false,
+        thinkingContent: undefined as string | undefined,
       },
       addMessage: () => {
         this._addMessage(progress.hassMessage);
@@ -545,13 +579,69 @@ export class HaAssistChat extends LitElement {
 
           if (isAssistantDelta(delta)) {
             if (delta.content) {
-              progress.hassMessage.text =
-                progress.hassMessage.text.substring(
+              // Add the new content to the thinking buffer
+              thinkingBuffer += delta.content;
+
+              // Process the buffer to handle <think> tags
+              let processedContent = "";
+              let thinkingContentToAdd = "";
+              let remainingBuffer = thinkingBuffer;
+
+              // Check for opening <think> tag
+              if (!isThinking && remainingBuffer.includes("<think>")) {
+                const thinkIndex = remainingBuffer.indexOf("<think>");
+                // Add content before <think> tag to processed content
+                processedContent += remainingBuffer.substring(0, thinkIndex);
+                remainingBuffer = remainingBuffer.substring(
+                  thinkIndex + "<think>".length
+                );
+                isThinking = true;
+                progress.hassMessage.thinking = true;
+              }
+
+              // Check for closing </think> tag
+              if (isThinking && remainingBuffer.includes("</think>")) {
+                const endThinkIndex = remainingBuffer.indexOf("</think>");
+                // Save content inside <think> tags to thinkingContent
+                thinkingContentToAdd = remainingBuffer.substring(
                   0,
-                  progress.hassMessage.text.length - 1
-                ) +
-                delta.content +
-                "…";
+                  endThinkIndex
+                );
+                remainingBuffer = remainingBuffer.substring(
+                  endThinkIndex + "</think>".length
+                );
+                isThinking = false;
+                progress.hassMessage.thinking = false;
+              }
+
+              // If not thinking, add remaining buffer to processed content
+              if (!isThinking) {
+                processedContent += remainingBuffer;
+                thinkingBuffer = "";
+              } else {
+                // Keep the buffer for next iteration
+                thinkingBuffer = remainingBuffer;
+              }
+
+              // Update the thinking content
+              if (thinkingContentToAdd) {
+                if (!progress.hassMessage.thinkingContent) {
+                  progress.hassMessage.thinkingContent = "";
+                }
+                progress.hassMessage.thinkingContent += thinkingContentToAdd;
+              }
+
+              // Update the message text with processed content
+              if (processedContent) {
+                const currentText = progress.hassMessage.text;
+                const textWithoutEllipsis = currentText.substring(
+                  0,
+                  currentText.length - 1
+                );
+                progress.hassMessage.text =
+                  textWithoutEllipsis + processedContent + "…";
+              }
+
               this.requestUpdate("_conversation");
             }
             if (delta.tool_calls) {
@@ -731,6 +821,61 @@ export class HaAssistChat extends LitElement {
       inset-inline-end: 5px;
       inset-inline-start: initial;
       top: 0px;
+    }
+
+    .thinking-indicator {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      margin-bottom: 4px;
+    }
+
+    .thinking-text {
+      font-style: italic;
+      opacity: 0.7;
+    }
+
+    .thinking-dots {
+      display: flex;
+      gap: 2px;
+    }
+
+    .thinking-dots .dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background-color: currentColor;
+      opacity: 0.7;
+      animation: thinking-bounce 1.4s infinite ease-in-out both;
+    }
+
+    .thinking-dots .dot:nth-child(1) {
+      animation-delay: -0.32s;
+    }
+
+    .thinking-dots .dot:nth-child(2) {
+      animation-delay: -0.16s;
+    }
+
+    @keyframes thinking-bounce {
+      0%,
+      80%,
+      100% {
+        transform: scale(0);
+      }
+      40% {
+        transform: scale(1);
+      }
+    }
+
+    .thinking-expansion {
+      margin-top: 8px;
+      opacity: 0.8;
+    }
+
+    .thinking-expansion ha-markdown {
+      font-style: italic;
+      font-size: 0.9em;
     }
   `;
 }
